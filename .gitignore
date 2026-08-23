@@ -1,0 +1,14 @@
+# build artifacts
+*.o
+*.cu.o
+*.out
+*.so
+*.a
+build/
+bin/
+
+# log
+*.log
+
+# tmp
+*.tmp
