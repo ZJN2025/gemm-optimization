@@ -10,12 +10,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES 120)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(
     gemm_kernels
     kernels/gemm_naive.cu
+    kernels/gemm_shared_tiling.cu
 )
 target_include_directories(
     gemm_kernels

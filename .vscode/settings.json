@@ -1,0 +1,38 @@
+{
+    "editor.formatOnSave": true,
+    "editor.quickSuggestions": {
+        "other": true,
+        "comments": false,
+        "strings": false
+    },
+    "editor.suggestOnTriggerCharacters": true,
+    "editor.acceptSuggestionOnEnter": "on",
+    "editor.tabCompletion": "on",
+
+    "files.associations": {
+        "*.cu": "cuda-cpp",
+        "*.cuh": "cuda-cpp",
+        "*.hpp": "cpp",
+        "*.h": "cpp"
+    },
+
+    "[cpp]": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+
+    "[cuda-cpp]": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+
+    "C_Cpp.clang_format_style": "file",
+    "C_Cpp.clang_format_fallbackStyle": "Google",
+
+    "C_Cpp.intelliSenseEngine": "default",
+    "C_Cpp.autocomplete": "default",
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.default.cppStandard": "c++17",
+
+    "C_Cpp.default.compileCommands": "/workspace/ubuntu24.04/learn/gemm-optimization/build/compile_commands.json"
+}
