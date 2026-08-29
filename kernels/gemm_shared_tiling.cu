@@ -21,7 +21,7 @@ __global__ void gemm_shared_tiling(
     const int ty=threadIdx.y;
 
     const int row=blockIdx.y*TILE_SIZE+ty;
-    const int col=blockIdx,x*TILE_SIZE+tx;
+    const int col=blockIdx.x*TILE_SIZE+tx;
 
     float sum=0.0f;
     //沿K维切分tile
@@ -32,7 +32,7 @@ __global__ void gemm_shared_tiling(
             tile_A[ty][tx]=0.0f;
         }
 
-        //loda data to shared memory
+        //load data to shared memory
         if(col<N&&tile_k+ty<K){
             tile_B[ty][tx]=B[(tile_k + ty) * N +
                   col];
@@ -61,7 +61,7 @@ __global__ void gemm_shared_tiling(
     }
 }
 
-void launcher_gemm_shared_tilling(
+void launch_gemm_shared_tiling(
     int M,
     int N,
     int K,

@@ -1,13 +1,21 @@
 //executable均从项目根目录执行
+//
+// 用法：
+//   benchmark_gemm                 # 跑全部 kernel，结果写 results/benchmark.csv
+//   benchmark_gemm <kernel_name>   # 只跑指定 kernel，结果写 results/benchmark_<name>.csv
+//                                  # （单 kernel 模式不覆盖全量 CSV，方便 ncu 过滤前单独计时）
+//   benchmark_gemm -h              # 列出可用 kernel
 
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "cuda_check.hpp"
@@ -27,8 +35,13 @@ struct GemmProblem {
 // Common launcher interface
 // ============================================================
 
+// fp32 输入版本（naive / shared_tiling / vectorized / async_copy / double_buffer）
 using GemmLauncher = void (*)(int M, int N, int K, float alpha, const float* A, const float* B,
                               float beta, float* C);
+
+// fp16 输入版本（tensor_core / tensor_core_optimized）
+using HalfGemmLauncher = void (*)(int M, int N, int K, float alpha, const half* A, const half* B,
+                                  float beta, float* C);
 
 // ============================================================
 // Kernel registration
@@ -36,7 +49,8 @@ using GemmLauncher = void (*)(int M, int N, int K, float alpha, const float* A, 
 
 struct GemmKernel {
     std::string name;
-    GemmLauncher launcher;
+    GemmLauncher launcher;           // fp32 输入内核
+    HalfGemmLauncher half_launcher;  // fp16 输入内核；二者取其一，另一个置 nullptr
 };
 
 // ============================================================
@@ -58,8 +72,10 @@ struct BenchmarkResult {
 // Benchmark one GEMM problem
 // ============================================================
 
-BenchmarkResult benchmark_one(const GemmKernel& kernel, const GemmProblem& problem,
-                              int warmup_iterations, int benchmark_iterations) {
+template <typename DataT, typename Launcher>
+BenchmarkResult benchmark_one(const std::string& name, Launcher launcher,
+                              const GemmProblem& problem, int warmup_iterations,
+                              int benchmark_iterations) {
     const int M = problem.M;
     const int N = problem.N;
     const int K = problem.K;
@@ -71,29 +87,41 @@ BenchmarkResult benchmark_one(const GemmKernel& kernel, const GemmProblem& probl
     // Host memory
     // --------------------------------------------------------
 
-    std::vector<float> A(static_cast<std::size_t>(M) * K);
+    std::vector<DataT> A(static_cast<std::size_t>(M) * K);
 
-    std::vector<float> B(static_cast<std::size_t>(K) * N);
+    std::vector<DataT> B(static_cast<std::size_t>(K) * N);
 
-    for (float& value : A) {
-        value = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+    for (DataT& value : A) {
+        const float f = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+
+        if constexpr (std::is_same_v<DataT, half>) {
+            value = __float2half(f);
+        } else {
+            value = f;
+        }
     }
 
-    for (float& value : B) {
-        value = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+    for (DataT& value : B) {
+        const float f = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+
+        if constexpr (std::is_same_v<DataT, half>) {
+            value = __float2half(f);
+        } else {
+            value = f;
+        }
     }
 
     // --------------------------------------------------------
     // Device memory
     // --------------------------------------------------------
 
-    float* d_A = nullptr;
-    float* d_B = nullptr;
+    DataT* d_A = nullptr;
+    DataT* d_B = nullptr;
     float* d_C = nullptr;
 
-    const std::size_t bytes_A = static_cast<std::size_t>(M) * K * sizeof(float);
+    const std::size_t bytes_A = static_cast<std::size_t>(M) * K * sizeof(DataT);
 
-    const std::size_t bytes_B = static_cast<std::size_t>(K) * N * sizeof(float);
+    const std::size_t bytes_B = static_cast<std::size_t>(K) * N * sizeof(DataT);
 
     const std::size_t bytes_C = static_cast<std::size_t>(M) * N * sizeof(float);
 
@@ -114,7 +142,7 @@ BenchmarkResult benchmark_one(const GemmKernel& kernel, const GemmProblem& probl
     // --------------------------------------------------------
 
     for (int i = 0; i < warmup_iterations; ++i) {
-        kernel.launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
+        launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
     }
 
     cuda_check(cudaGetLastError(), "warmup launch");
@@ -135,7 +163,7 @@ BenchmarkResult benchmark_one(const GemmKernel& kernel, const GemmProblem& probl
     cuda_check(cudaEventRecord(start), "record start event");
 
     for (int i = 0; i < benchmark_iterations; ++i) {
-        kernel.launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
+        launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
     }
 
     cuda_check(cudaGetLastError(), "benchmark launch");
@@ -173,14 +201,14 @@ BenchmarkResult benchmark_one(const GemmKernel& kernel, const GemmProblem& probl
 
     cuda_check(cudaFree(d_C), "cudaFree d_C");
 
-    return {kernel.name, M, N, K, average_ms, tflops};
+    return {name, M, N, K, average_ms, tflops};
 }
 
 // ============================================================
 // Main
 // ============================================================
 
-int main() {
+int main(int argc, char** argv) {
     const int warmup_iterations = 10;
 
     const int benchmark_iterations = 10;
@@ -189,6 +217,7 @@ int main() {
     // Problems
     // --------------------------------------------------------
 
+    // 注意：所有尺寸均为 16 的倍数，满足 tensor core 系列内核的边界要求
     const std::vector<GemmProblem> problems = {
         {256, 256, 256},    {512, 512, 512},    {1024, 1024, 1024},
         {2048, 2048, 2048}, {4096, 4096, 4096},
@@ -199,22 +228,53 @@ int main() {
     // --------------------------------------------------------
 
     const std::vector<GemmKernel> kernels = {
-        {
-            "gemm_naive",
-            launch_gemm_naive,
-        },
+        {"gemm_naive", launch_gemm_naive, nullptr},
+        {"gemm_shared_tiling", launch_gemm_shared_tiling, nullptr},
+        {"gemm_vectorized", launch_gemm_vectorized, nullptr},
+        {"gemm_async_copy", launch_gemm_async_copy, nullptr},
+        {"gemm_double_buffer", launch_gemm_double_buffer, nullptr},
+        {"gemm_async_vectorized", launch_gemm_async_vectorized, nullptr},
+        {"gemm_simt_128x128", launch_gemm_simt_128x128, nullptr},
+        {"gemm_tensor_core", nullptr, launch_gemm_tensor_core},
+        {"gemm_tensor_core_optimized", nullptr, launch_gemm_tensor_core_optimized},
     };
+
+    // --------------------------------------------------------
+    // Command line
+    // --------------------------------------------------------
+
+    std::string only_kernel;
+
+    if (argc > 1) {
+        only_kernel = argv[1];
+
+        if (only_kernel == "-h" || only_kernel == "--help") {
+            std::cout << "usage: benchmark_gemm [kernel_name]\n\n";
+            std::cout << "available kernels:\n";
+
+            for (const GemmKernel& kernel : kernels) {
+                std::cout << "  " << kernel.name << '\n';
+            }
+
+            return EXIT_SUCCESS;
+        }
+    }
 
     // --------------------------------------------------------
     // Results directory
     // --------------------------------------------------------
 
+    // 单 kernel 模式写单独的文件，不覆盖全量对比数据
+    const std::string csv_path =
+        only_kernel.empty() ? "results/benchmark.csv"
+                            : "results/benchmark_" + only_kernel + ".csv";
+
     std::filesystem::create_directories("results");
 
-    std::ofstream csv("results/benchmark.csv");
+    std::ofstream csv(csv_path);
 
     if (!csv.is_open()) {
-        std::cerr << "Failed to open results/benchmark.csv\n";
+        std::cerr << "Failed to open " << csv_path << "\n";
 
         return EXIT_FAILURE;
     }
@@ -222,10 +282,18 @@ int main() {
     csv << "kernel," << "M," << "N," << "K," << "latency_ms," << "tflops\n";
 
     // --------------------------------------------------------
-    // Run all benchmarks
+    // Run benchmarks
     // --------------------------------------------------------
 
+    bool matched = false;
+
     for (const GemmKernel& kernel : kernels) {
+        if (!only_kernel.empty() && kernel.name != only_kernel) {
+            continue;
+        }
+
+        matched = true;
+
         std::cout << "\n========================================\n";
 
         std::cout << "Kernel: " << kernel.name << '\n';
@@ -234,7 +302,11 @@ int main() {
 
         for (const GemmProblem& problem : problems) {
             const BenchmarkResult result =
-                benchmark_one(kernel, problem, warmup_iterations, benchmark_iterations);
+                kernel.half_launcher != nullptr
+                    ? benchmark_one<half>(kernel.name, kernel.half_launcher, problem,
+                                          warmup_iterations, benchmark_iterations)
+                    : benchmark_one<float>(kernel.name, kernel.launcher, problem,
+                                           warmup_iterations, benchmark_iterations);
 
             std::cout << "M=" << result.M << " N=" << result.N << " K=" << result.K
                       << " | latency=" << result.average_ms << " ms"
@@ -245,7 +317,18 @@ int main() {
         }
     }
 
-    std::cout << "\nBenchmark results saved to " << "results/benchmark.csv\n";
+    if (!only_kernel.empty() && !matched) {
+        std::cerr << "unknown kernel: " << only_kernel << "\n\n";
+        std::cerr << "available kernels:\n";
+
+        for (const GemmKernel& kernel : kernels) {
+            std::cerr << "  " << kernel.name << '\n';
+        }
+
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "\nBenchmark results saved to " << csv_path << "\n";
 
     return 0;
 }

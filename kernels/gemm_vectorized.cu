@@ -201,3 +201,37 @@ __global__ void gemm_vectorized(
         }
     }
 }
+void launch_gemm_vectorized(
+    int M,
+    int N,
+    int K,
+    float alpha,
+    const float* A,
+    const float* B,
+    float beta,
+    float* C) {
+
+    constexpr int BM = 64;
+    constexpr int BN = 64;
+    constexpr int BK = 8;
+
+    constexpr int TM = 4;
+    constexpr int TN = 4;
+
+    dim3 block(
+        BN / TN,
+        BM / TM);
+
+    dim3 grid(
+        (N + BN - 1) / BN,
+        (M + BM - 1) / BM);
+
+    gemm_vectorized<
+        BM, BN, BK, TM, TN>
+        <<<grid, block>>>(
+            M, N, K,
+            alpha,
+            A, B,
+            beta,
+            C);
+}

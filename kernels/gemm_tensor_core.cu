@@ -1,6 +1,8 @@
 #include <cuda_fp16.h>
 #include <mma.h>
 
+#include "gemm.hpp"
+
 using namespace nvcuda;
 
 __global__ void gemm_tensor_core(
