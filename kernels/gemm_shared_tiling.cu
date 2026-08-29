@@ -2,7 +2,7 @@
 
 #include "gemm.hpp"
 
-constexpr int TILE_SIZE=16;
+
 template <int TILE_SIZE>
 __global__ void gemm_shared_tiling(
     int M,
@@ -52,10 +52,6 @@ __global__ void gemm_shared_tiling(
         __syncthreads();
 
         
-
-
-
-
     }
     if (row < M && col < N) {
 
@@ -63,4 +59,22 @@ __global__ void gemm_shared_tiling(
             alpha * sum +
             beta * C[row * N + col];
     }
+}
+
+void launcher_gemm_shared_tilling(
+    int M,
+    int N,
+    int K,
+    float alpha,
+    const float* A,
+    const float* B,
+    float beta,
+    float* C
+){
+    constexpr int TILE_SIZE=16;
+    dim3 block(TILE_SIZE,TILE_SIZE);
+    dim3 grid((N+TILE_SIZE-1)/TILE_SIZE,(M+TILE_SIZE-1)/TILE_SIZE);
+
+    gemm_shared_tiling<TILE_SIZE><<<grid,block>>>(M,N,K,alpha,A,B,beta,C);
+
 }
