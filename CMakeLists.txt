@@ -69,6 +69,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cutlass)
 
 add_executable(
+    check_smem
+    tools/check_smem.cu
+)
+add_executable(
     benchmark_cutlass
     benchmark/benchmark_cutlass.cu
 )

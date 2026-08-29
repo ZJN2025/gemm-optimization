@@ -64,7 +64,8 @@ cmake -S . -B build && cmake --build build -j
 │   ├── benchmark_gemm.cu       # CUDA event 计时，输出 TFLOPS，写 results/benchmark.csv
 │   └── benchmark_cutlass.cu    # CUTLASS 参考基线，写 results/benchmark_cutlass.csv
 ├── tools/
-│   └── plot_benchmark.py       # 把 benchmark.csv 画成对比图
+│   ├── plot_benchmark.py       # 把 benchmark.csv 画成对比图
+│   └── check_smem.cu           # 探测本机共享内存上限（静态 / opt-in 两档，换卡后复测用）
 ├── docs/
 │   ├── development-process.md  # 开发流程复盘：每个阶段的动机、结果、踩坑（演示/面试用）
 │   └── knowledge-points.md     # 知识点整理：内存层次、分块、bank conflict 等，含 trade-off
