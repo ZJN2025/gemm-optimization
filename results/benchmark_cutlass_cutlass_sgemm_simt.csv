@@ -1,0 +1,6 @@
+kernel,M,N,K,latency_ms,tflops
+cutlass_sgemm_simt,256,256,256,0.0623584,0.53809
+cutlass_sgemm_simt,512,512,512,0.074896,3.58411
+cutlass_sgemm_simt,1024,1024,1024,0.213056,10.0794
+cutlass_sgemm_simt,2048,2048,2048,1.32749,12.9416
+cutlass_sgemm_simt,4096,4096,4096,11.4417,12.0121
