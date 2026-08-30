@@ -1,21 +1,23 @@
 //executable均从项目根目录执行
 //
-// CUTLASS 参考基线：用 CUTLASS 官方实现跑同样的尺寸和计时方法，
-// 结果写入 results/benchmark_cutlass.csv，供 tools/plot_benchmark.py 叠加对比。
+// 参考基线：CUTLASS（simt/tf32/hgemm）+ cuBLAS（sgemm/tf32/hgemm），
+// 用同样的尺寸和计时方法，结果写入 results/benchmark_cutlass.csv。
 //
 // 用法：
-//   benchmark_cutlass                 # 跑全部三种配置
+//   benchmark_cutlass                 # 跑全部六种配置
 //   benchmark_cutlass <config_name>   # 只跑指定配置，结果写 results/benchmark_cutlass_<name>.csv
 //   benchmark_cutlass -h              # 列出可用配置
 //
-// 三个配置：
+// 六个配置：
 // - cutlass_sgemm_simt : fp32 SIMT（FFMA），与手写 fp32 kernel 同精度，可比性最强
 // - cutlass_sgemm_tf32 : fp32 走 tf32 tensor core（精度略降、吞吐高），业界常用
 // - cutlass_hgemm      : fp16 输入 / fp32 累积，与手写 tensor core kernel 直接对比
+// - cublas_sgemm(_tf32) / cublas_hgemm : cuBLAS 官方实现，最常用的参考基线
 
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -136,6 +138,11 @@ inline cutlass::half_t to_input_type<cutlass::half_t>(float value) {
 template <>
 inline cutlass::tfloat32_t to_input_type<cutlass::tfloat32_t>(float value) {
     return cutlass::tfloat32_t(value);
+}
+
+template <>
+inline half to_input_type<half>(float value) {
+    return __float2half(value);
 }
 
 // ============================================================
@@ -272,6 +279,132 @@ BenchmarkResult benchmark_one(const std::string& name, const GemmProblem& proble
 }
 
 // ============================================================
+// launcher 指针版 benchmark（给 cuBLAS wrapper 用，与 benchmark_gemm 同款计时逻辑）
+// ============================================================
+
+template <typename DataT, typename Launcher>
+BenchmarkResult benchmark_one_launcher(const std::string& name, Launcher launcher,
+                                       const GemmProblem& problem, int warmup_iterations,
+                                       int benchmark_iterations) {
+    const int M = problem.M;
+    const int N = problem.N;
+    const int K = problem.K;
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    std::vector<DataT> A(static_cast<std::size_t>(M) * K);
+    std::vector<DataT> B(static_cast<std::size_t>(K) * N);
+
+    for (DataT& value : A) {
+        value = to_input_type<DataT>(random_float());
+    }
+
+    for (DataT& value : B) {
+        value = to_input_type<DataT>(random_float());
+    }
+
+    DataT* d_A = nullptr;
+    DataT* d_B = nullptr;
+    float* d_C = nullptr;
+
+    const std::size_t bytes_A = static_cast<std::size_t>(M) * K * sizeof(DataT);
+    const std::size_t bytes_B = static_cast<std::size_t>(K) * N * sizeof(DataT);
+    const std::size_t bytes_C = static_cast<std::size_t>(M) * N * sizeof(float);
+
+    cuda_check(cudaMalloc(&d_A, bytes_A), "cudaMalloc d_A");
+    cuda_check(cudaMalloc(&d_B, bytes_B), "cudaMalloc d_B");
+    cuda_check(cudaMalloc(&d_C, bytes_C), "cudaMalloc d_C");
+
+    cuda_check(cudaMemcpy(d_A, A.data(), bytes_A, cudaMemcpyHostToDevice), "copy A host to device");
+    cuda_check(cudaMemcpy(d_B, B.data(), bytes_B, cudaMemcpyHostToDevice), "copy B host to device");
+    cuda_check(cudaMemset(d_C, 0, bytes_C), "clear d_C");
+
+    for (int i = 0; i < warmup_iterations; ++i) {
+        launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
+    }
+
+    cuda_check(cudaGetLastError(), "warmup launch");
+    cuda_check(cudaDeviceSynchronize(), "warmup synchronize");
+
+    cudaEvent_t start;
+    cudaEvent_t stop;
+
+    cuda_check(cudaEventCreate(&start), "create start event");
+    cuda_check(cudaEventCreate(&stop), "create stop event");
+
+    cuda_check(cudaEventRecord(start), "record start event");
+
+    for (int i = 0; i < benchmark_iterations; ++i) {
+        launcher(M, N, K, alpha, d_A, d_B, beta, d_C);
+    }
+
+    cuda_check(cudaGetLastError(), "benchmark launch");
+    cuda_check(cudaEventRecord(stop), "record stop event");
+    cuda_check(cudaEventSynchronize(stop), "synchronize stop event");
+
+    float total_ms = 0.0f;
+
+    cuda_check(cudaEventElapsedTime(&total_ms, start, stop), "calculate elapsed time");
+
+    const float average_ms = total_ms / static_cast<float>(benchmark_iterations);
+
+    const double flops =
+        2.0 * static_cast<double>(M) * static_cast<double>(N) * static_cast<double>(K);
+
+    const double tflops = flops / static_cast<double>(average_ms) / 1e9;
+
+    cuda_check(cudaEventDestroy(start), "destroy start event");
+    cuda_check(cudaEventDestroy(stop), "destroy stop event");
+
+    cuda_check(cudaFree(d_A), "cudaFree d_A");
+    cuda_check(cudaFree(d_B), "cudaFree d_B");
+    cuda_check(cudaFree(d_C), "cudaFree d_C");
+
+    return {name, M, N, K, average_ms, tflops};
+}
+
+// ============================================================
+// cuBLAS 参考基线
+// cuBLAS 是列主序：行主序 C = A x B 等价于列主序 C^T = B^T x A^T，
+// 直接交换 A、B 的角色即可（都取 CUBLAS_OP_N）。
+// ============================================================
+
+cublasHandle_t get_cublas_handle(cublasMath_t math) {
+    static cublasHandle_t default_handle = [] {
+        cublasHandle_t h = nullptr;
+        cublasCreate(&h);
+        return h;
+    }();
+    static cublasHandle_t tf32_handle = [] {
+        cublasHandle_t h = nullptr;
+        cublasCreate(&h);
+        cublasSetMathMode(h, CUBLAS_TF32_TENSOR_OP_MATH);
+        return h;
+    }();
+    return math == CUBLAS_DEFAULT_MATH ? default_handle : tf32_handle;
+}
+
+void launch_cublas_sgemm(int M, int N, int K, float alpha, const float* A, const float* B,
+                         float beta, float* C) {
+    cublasSgemm(get_cublas_handle(CUBLAS_DEFAULT_MATH), CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
+                B, N, A, K, &beta, C, N);
+}
+
+void launch_cublas_sgemm_tf32(int M, int N, int K, float alpha, const float* A, const float* B,
+                              float beta, float* C) {
+    cublasSgemm(get_cublas_handle(CUBLAS_TF32_TENSOR_OP_MATH), CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
+                &alpha, B, N, A, K, &beta, C, N);
+}
+
+void launch_cublas_hgemm(int M, int N, int K, float alpha, const half* A, const half* B,
+                         float beta, float* C) {
+    cublasGemmEx(get_cublas_handle(CUBLAS_DEFAULT_MATH), CUBLAS_OP_N, CUBLAS_OP_N, N, M, K,
+                 &alpha, B, CUDA_R_16F, N, A, CUDA_R_16F, K, &beta, C, CUDA_R_32F, N,
+                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -291,6 +424,7 @@ int main(int argc, char** argv) {
 
     const std::vector<std::string> config_names = {
         "cutlass_sgemm_simt", "cutlass_sgemm_tf32", "cutlass_hgemm",
+        "cublas_sgemm",       "cublas_sgemm_tf32",  "cublas_hgemm",
     };
 
     std::string only_config;
@@ -372,6 +506,25 @@ int main(int argc, char** argv) {
         if (selected("cutlass_hgemm")) {
             run_and_report(benchmark_one<CutlassHgemm, cutlass::half_t>(
                 "cutlass_hgemm", problem, warmup_iterations, benchmark_iterations));
+        }
+
+        if (selected("cublas_sgemm")) {
+            run_and_report(benchmark_one_launcher<float>("cublas_sgemm", launch_cublas_sgemm,
+                                                         problem, warmup_iterations,
+                                                         benchmark_iterations));
+        }
+
+        if (selected("cublas_sgemm_tf32")) {
+            run_and_report(benchmark_one_launcher<float>("cublas_sgemm_tf32",
+                                                         launch_cublas_sgemm_tf32, problem,
+                                                         warmup_iterations,
+                                                         benchmark_iterations));
+        }
+
+        if (selected("cublas_hgemm")) {
+            run_and_report(benchmark_one_launcher<half>("cublas_hgemm", launch_cublas_hgemm,
+                                                        problem, warmup_iterations,
+                                                        benchmark_iterations));
         }
     }
 

@@ -14,6 +14,9 @@ set(CMAKE_CUDA_ARCHITECTURES 120)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# cuBLAS 基线需要（CUDA::cublas 等 imported target 由此提供）
+find_package(CUDAToolkit REQUIRED)
+
 add_library(
     gemm_kernels
     kernels/gemm_naive.cu
@@ -23,8 +26,10 @@ add_library(
     kernels/gemm_double_buffer.cu
     kernels/gemm_async_vectorized.cu
     kernels/gemm_simt_128x128.cu
+    kernels/gemm_controlled.cu
     kernels/gemm_tensor_core.cu
     kernels/gemm_tensor_core_optimized.cu
+    kernels/gemm_tensor_core_mma.cu
 )
 target_include_directories(
     gemm_kernels
@@ -91,6 +96,7 @@ target_link_libraries(
     benchmark_cutlass
     PRIVATE
     nvidia::cutlass::cutlass
+    CUDA::cublas
 )
 
 # 测试不依赖工作目录，可在任意目录运行；benchmark 需从项目根目录执行（结果写入 results/）

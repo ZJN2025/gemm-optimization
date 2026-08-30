@@ -259,12 +259,34 @@ int main() {
     all_pass &= run_kernel_tests<float>("gemm_simt_128x128", launch_gemm_simt_128x128,
                                         fp32_tolerance, fp32_sizes);
 
+    // 对照实验组（同一模板的不同实例，全部过一遍正确性）
+    all_pass &= run_kernel_tests<float>("gemm_tile_32x32", launch_gemm_tile_32x32,
+                                        fp32_tolerance, fp32_sizes);
+
+    all_pass &= run_kernel_tests<float>("gemm_tile_64x64", launch_gemm_tile_64x64,
+                                        fp32_tolerance, fp32_sizes);
+
+    all_pass &= run_kernel_tests<float>("gemm_tile_128x128", launch_gemm_tile_128x128,
+                                        fp32_tolerance, fp32_sizes);
+
+    all_pass &= run_kernel_tests<float>("gemm_rblock_4x8", launch_gemm_rblock_4x8,
+                                        fp32_tolerance, fp32_sizes);
+
+    all_pass &= run_kernel_tests<float>("gemm_stages2_128x128", launch_gemm_stages2_128x128,
+                                        fp32_tolerance, fp32_sizes);
+
+    all_pass &= run_kernel_tests<float>("gemm_stages4_128x128", launch_gemm_stages4_128x128,
+                                        fp32_tolerance, fp32_sizes);
+
     all_pass &= run_kernel_tests<half>("gemm_tensor_core", launch_gemm_tensor_core,
                                        fp16_tolerance, fp16_sizes);
 
     all_pass &= run_kernel_tests<half>("gemm_tensor_core_optimized",
                                        launch_gemm_tensor_core_optimized, fp16_tolerance,
                                        fp16_sizes);
+
+    all_pass &= run_kernel_tests<half>("gemm_tensor_core_mma", launch_gemm_tensor_core_mma,
+                                       fp16_tolerance, fp16_sizes);
 
     std::cout << "\n========================================\n";
     std::cout << (all_pass ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << '\n';

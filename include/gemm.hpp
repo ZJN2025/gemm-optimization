@@ -42,6 +42,29 @@ void launch_gemm_simt_128x128(int M, int N, int K, float alpha, const float* A, 
                               float beta, float* C);
 
 // ----------------------------
+// 对照实验组（见 kernels/gemm_controlled.cu）：同一骨架只改一个变量，
+// 骨架 = cp.async + float4 + N-stage 流水，K、N 需为 4 的倍数
+// ----------------------------
+
+// tile 尺寸组：BK=8、4x4 分块、2-stage 固定，只改 BM=BN
+void launch_gemm_tile_32x32(int M, int N, int K, float alpha, const float* A, const float* B,
+                            float beta, float* C);
+void launch_gemm_tile_64x64(int M, int N, int K, float alpha, const float* A, const float* B,
+                            float beta, float* C);
+void launch_gemm_tile_128x128(int M, int N, int K, float alpha, const float* A, const float* B,
+                              float beta, float* C);
+
+// 寄存器分块组：128x128x8、2-stage 固定（4x4 = tile_128x128，8x8 = gemm_simt_128x128）
+void launch_gemm_rblock_4x8(int M, int N, int K, float alpha, const float* A, const float* B,
+                            float beta, float* C);
+
+// 流水深度组：128x128x8、8x8 固定；stages2 同时校验通用模板与手写版实现一致
+void launch_gemm_stages2_128x128(int M, int N, int K, float alpha, const float* A,
+                                 const float* B, float beta, float* C);
+void launch_gemm_stages4_128x128(int M, int N, int K, float alpha, const float* A,
+                                 const float* B, float beta, float* C);
+
+// ----------------------------
 // fp16 输入（tensor core / wmma，fp32 累积）
 // ----------------------------
 
@@ -52,3 +75,8 @@ void launch_gemm_tensor_core(int M, int N, int K, float alpha, const half* A, co
 // 注意：要求 M 为 32 的倍数、N 为 64 的倍数（warp 级 16x16 输出不做边界裁剪）
 void launch_gemm_tensor_core_optimized(int M, int N, int K, float alpha, const half* A,
                                        const half* B, float beta, float* C);
+
+// fp16 升级版：cp.async + ldmatrix + mma.sync m16n8k16 完整数据通路；
+// 要求 K、N 为 8 的倍数（16B 对齐），M 任意
+void launch_gemm_tensor_core_mma(int M, int N, int K, float alpha, const half* A, const half* B,
+                                 float beta, float* C);

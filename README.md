@@ -33,13 +33,22 @@ cmake -S . -B build && cmake --build build -j
 ./build/benchmark_gemm gemm_simt_128x128
 ./build/benchmark_gemm -h    # 列出可用 kernel
 
+# 网络不稳导致 configure 在下载 CUTLASS 时卡住/失败时的替代方案：
+# 用已解压的源码目录跳过下载（_deps/cutlass-src 只要 configure 成功过一次就会缓存）
+cmake -S . -B build -DFETCHCONTENT_SOURCE_DIR_CUTLASS=$(pwd)/build/_deps/cutlass-src
+
 # CUTLASS 参考基线（同样从项目根目录执行，结果写入 results/benchmark_cutlass.csv；
 # CUTLASS v4.7.1 由 CMake 在 configure 时自动下载，缓存在 build/_deps）
 ./build/benchmark_cutlass
 ./build/benchmark_cutlass cutlass_hgemm   # 只跑指定配置
 
-# 生成对比图（TFLOPS / 延迟 / 加速比三张面板；CUTLASS 参考线以灰色虚线自动叠加）
+# 生成对比图（主线 kernel 一张 + 对照实验一张；参考基线数据在 benchmark_cutlass.csv 里）
 .venv/bin/python tools/plot_benchmark.py
+
+# 严谨模式：跑 3 次取中位数（本机不支持 nvidia-smi 锁频，用中位数抑制时钟漂移）
+.venv/bin/python tools/median_benchmark.py                          # benchmark_gemm 3 次
+.venv/bin/python tools/median_benchmark.py --cmd ./build/benchmark_cutlass \
+    --out results/benchmark_cutlass.csv                            # 参考基线 3 次
 ```
 
 ## 项目结构
@@ -86,6 +95,24 @@ cmake -S . -B build && cmake --build build -j
 | `gemm_simt_128x128` | 128×128 大 tile + 每线程 8×8 寄存器分块 + cp.async 双缓冲（CUTLASS 经典 simt sgemm 同款设计） | fp32 | 128×128×8 |
 | `gemm_tensor_core` | wmma 16×16×16，直接取数不经过 smem | fp16 | 16×16×16 |
 | `gemm_tensor_core_optimized` | wmma + smem 中转 + 8 warp 协作加载 | fp16 | 32×64×16 |
+| `gemm_tensor_core_mma` | 完整数据通路：cp.async → 8×8 块布局 smem → ldmatrix → mma.sync m16n8k16 | fp16 | 64×64×16 |
+
+### 对照实验组（单变量控制）
+
+主线 kernel 演进时经常同时改变多个变量（tile、分块、异步拷贝……），横向对比会混杂。
+对照实验组全部由同一个全参数模板 kernel（`kernels/gemm_controlled.cu`，
+骨架 = cp.async + float4 + N-stage 流水）实例化，**每个实验只改一个变量**：
+
+| 实验 | 固定 | 只改变 | 对照组 kernel |
+|---|---|---|---|
+| tile 尺寸 | BK=8、4×4 分块、2-stage | BM=BN ∈ {32, 64, 128} | tile_32x32 / tile_64x64 / tile_128x128 |
+| cp.async 有无 | 64×64×8、4×4 分块 | 加载路径（普通 load vs cp.async+双缓冲） | gemm_vectorized / tile_64x64 |
+| BK（K 方向分块） | 64×64、4×4 分块、cp.async | BK ∈ {8, 16} | tile_64x64 / gemm_async_vectorized |
+| 寄存器分块 | 128×128×8、2-stage | TM×TN ∈ {4×4, 4×8, 8×8} | tile_128x128 / rblock_4x8 / gemm_simt_128x128 |
+| 流水深度 | 128×128×8、8×8 | STAGES ∈ {2, 4} | stages2_128x128 / stages4_128x128 |
+
+`stages2_128x128` 同时是**实现一致性校验**：它与手写的 `gemm_simt_128x128` 配置完全相同，
+若两者分数接近，说明通用模板的加载路径没有偷工减料。对照实验结果见下文「对照实验数据」。
 
 ### 尺寸约束
 
@@ -96,42 +123,59 @@ cmake -S . -B build && cmake --build build -j
 | `gemm_simt_128x128` | K、N 为 4 的倍数 | 同上 |
 | `gemm_tensor_core` | M、N、K 为 16 的倍数 | wmma tile 16×16，K 循环不判边界 |
 | `gemm_tensor_core_optimized` | M 为 32 的倍数、N 为 64 的倍数 | warp 级 16×16 输出未做边界裁剪 |
+| `gemm_tensor_core_mma` | K、N 为 8 的倍数 | 16B 对齐；M 任意（越界零填充 + 写回判界） |
 
 ## 性能结果
 
-> 数据快照（2026-08-29，RTX 5060 Laptop），完整数据见 `results/benchmark.csv`，
-> 图见 `results/benchmark_analysis.png`。重新跑 benchmark 后这两个文件会自动更新。
+> 数据快照（2026-08-30，RTX 5060 Laptop，**3 次运行取中位数**——本机不支持 nvidia-smi
+> 锁频，用中位数抑制笔记本 GPU 的时钟漂移；单次原始数据在 `results/benchmark_run<i>.csv`）。
+> 完整数据见 `results/benchmark.csv` 和 `results/benchmark_cutlass.csv`，图见
+> `results/benchmark_analysis.png`。
 
 TFLOPS @ 4096×4096×4096（大尺寸才能体现 kernel 真实水平，256 那列受启动开销主导）：
 
 | kernel | TFLOPS | 相对 naive |
 |---|---|---|
-| gemm_naive | 1.11 | 1.0× |
-| gemm_shared_tiling | 1.52 | 1.4× |
-| gemm_vectorized | 6.50 | 5.9× |
-| gemm_async_copy | 2.88 | 2.6× |
-| gemm_double_buffer | 3.87 | 3.5× |
-| gemm_async_vectorized | 8.68 | 7.8× |
-| gemm_simt_128x128 | 10.31 | 9.3× |
-| gemm_tensor_core | 6.85 | 6.2× |
-| gemm_tensor_core_optimized | 6.80 | 6.1× |
-| cutlass_sgemm_simt（参考） | 12.25 | 11.1× |
-| cutlass_sgemm_tf32（参考） | 18.43 | 16.7× |
-| cutlass_hgemm（参考） | 35.08 | 31.7× |
+| gemm_naive | 1.10 | 1.0× |
+| gemm_shared_tiling | 1.53 | 1.4× |
+| gemm_vectorized | 6.56 | 6.0× |
+| gemm_async_copy | 2.87 | 2.6× |
+| gemm_double_buffer | 3.88 | 3.5× |
+| gemm_async_vectorized | 8.70 | 7.9× |
+| gemm_simt_128x128 | 10.37 | 9.4× |
+| gemm_tensor_core | 9.11 | 8.3× |
+| gemm_tensor_core_optimized | 7.58 | 6.9× |
+| gemm_tensor_core_mma | 19.48 | 17.7× |
+| cutlass_sgemm_simt（参考） | 12.29 | 11.2× |
+| cutlass_sgemm_tf32（参考） | 18.68 | 17.0× |
+| cutlass_hgemm（参考） | 36.29 | 33.0× |
+| cublas_sgemm（参考） | 11.72 | 10.7× |
+| cublas_sgemm_tf32（参考） | 18.75 | 17.0× |
+| cublas_hgemm（参考） | 37.34 | 33.9× |
 
 几个值得注意的结论：
 
-1. **fp32 的第一跳来自 vectorized**（1.5 → 6.5 TFLOPS）：float4 访存 + 64×64 大 tile + 每线程 4×4
+1. **fp32 的第一跳来自 vectorized**（1.5 → 6.6 TFLOPS）：float4 访存 + 64×64 大 tile + 每线程 4×4
    寄存器分块的组合拳，而不是某个单点技巧。
 2. **async_copy / double_buffer 跑不过 vectorized**：它们的 tile 只有 32×32、每线程 2×2 分块，
    覆盖访存延迟的收益抵不过计算密度低的损失——「用了 cp.async 就一定快」是错的，tile 配置才是大头。
 3. **async_vectorized（8.7 TFLOPS）验证了组合收益**：cp.async + float4 + 双缓冲搭上 64×64 配置后，
-   超过了 vectorized 和两个 tensor core 内核。
-4. **simt_128x128（10.3 TFLOPS）是 fp32 最佳**：128×128 tile + 每线程 8×8 分块把
-   FFMA:smem 访存比翻倍（64 次 FFMA 仅需 16 次 smem 读取），达到 CUTLASS simt 的 84%。
-5. **tensor_core 基础版与「优化版」基本打平**（6.8 上下）：优化版的 smem 中转（标量加载）+
-   每 tile 两次 `__syncthreads()` 的开销抵消了复用收益。优化方向：smem 加载向量化 / cp.async、
-   加大 tile 减少 barrier。
+   超过了 vectorized 和两个 wmma 内核。
+4. **simt_128x128（10.4 TFLOPS）是 fp32 最佳**：达到 cutlass simt 的 84%、cublas sgemm 的 88%。
+5. **tensor_core_mma（19.5 TFLOPS）是 fp16 升级的成果**：wmma 直取 9.1 → cp.async + ldmatrix +
+   mma.sync 数据通路 19.5（2.1×），超过 cutlass/cuBLAS 的 tf32 路径；离 cublas hgemm 的 37.3
+   还有 52% 差距——它们还有 warp 特化、更大 tile、更深流水、TMA 这几张牌。
+
+### 对照实验数据（单变量控制，4096 实测）
+
+| 实验 | 对照组 | TFLOPS | 结论 |
+|---|---|---|---|
+| tile 尺寸（4×4 分块固定） | 32×32 → 64×64 → 128×128 | 6.71 → 8.23 → **7.53** | **tile 不是越大越好**：4×4 分块下 64×64 最优，128×128 因 1024 线程/block 拉低 occupancy 反而回落 |
+| cp.async 有无（64×64×8、4×4 固定） | vectorized → tile_64x64 | 6.56 → 8.23 | cp.async+双缓冲的**纯贡献 +25%**（配置相同时） |
+| BK（64×64、4×4 固定） | BK=8 → BK=16 | 8.23 → 8.70 | BK=16 略好（+6%），barrier 减半的边际收益很小 |
+| 寄存器分块（128×128×8 固定） | 4×4 → 4×8 → 8×8 | 7.53 → 6.84 → **10.37** | **非单调**：4×8 这种"长条"分块因线程映射/bank conflict 反而最差；8×8 的 FFMA:访存比优势才是真金 |
+| 流水深度（128×128×8、8×8 固定） | 2-stage → 4-stage | 10.00 → 10.05 | **4-stage 几乎无收益（+0.5%）**：2-stage + 高 ILP 已遮住延迟，验证收益递减 |
+| 实现一致性校验 | 手写 simt_128x128 → 模板 stages2_128x128 | 10.37 → 10.00 | 同配置差 3.6%，确认模板化实现没有偷工减料 |
 
 ### 与 CUTLASS 的对比
 

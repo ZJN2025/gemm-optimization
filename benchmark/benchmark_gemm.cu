@@ -237,6 +237,14 @@ int main(int argc, char** argv) {
         {"gemm_simt_128x128", launch_gemm_simt_128x128, nullptr},
         {"gemm_tensor_core", nullptr, launch_gemm_tensor_core},
         {"gemm_tensor_core_optimized", nullptr, launch_gemm_tensor_core_optimized},
+        {"gemm_tensor_core_mma", nullptr, launch_gemm_tensor_core_mma},
+        // ---- 对照实验组（单变量控制，见 kernels/gemm_controlled.cu）----
+        {"gemm_tile_32x32", launch_gemm_tile_32x32, nullptr},
+        {"gemm_tile_64x64", launch_gemm_tile_64x64, nullptr},
+        {"gemm_tile_128x128", launch_gemm_tile_128x128, nullptr},
+        {"gemm_rblock_4x8", launch_gemm_rblock_4x8, nullptr},
+        {"gemm_stages2_128x128", launch_gemm_stages2_128x128, nullptr},
+        {"gemm_stages4_128x128", launch_gemm_stages4_128x128, nullptr},
     };
 
     // --------------------------------------------------------
